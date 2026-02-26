@@ -1,283 +1,271 @@
-import telebot
-import psycopg2
-import os
+import asyncio
 import re
-from telebot.types import (
-    ReplyKeyboardMarkup, KeyboardButton,
-    InlineKeyboardMarkup, InlineKeyboardButton
+import time
+import random
+from aiogram import Bot, Dispatcher, F
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
+from aiogram.filters import CommandStart, Command, CommandObject
+
+# Bot tokeni va ID'lar
+TOKEN = "8398806896:AAH33LHZDY22nTfajwXp1eVTWygnDisGxCc"
+BAZA_KANAL_ID = -1002496334857 
+ADMIN_ID = 5660204735 
+
+bot = Bot(token=TOKEN)
+dp = Dispatcher()
+
+kinolar_xotirasi = {}
+vip_kinolar = set() 
+foydalanuvchilar = set() 
+majburiy_kanallar = set() 
+
+referallar = {} 
+vip_foydalanuvchilar = {} 
+VIP_MUDDATI = 30 * 24 * 60 * 60 # 30 kun
+
+# ==========================================
+# ASOSIY MENYU TUGMALARI (Soddalashtirildi)
+# ==========================================
+asosiy_menyu = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text="👤 Shaxsiy kabinet"), KeyboardButton(text="🎲 Tasodifiy kino")]
+    ],
+    resize_keyboard=True
 )
 
-# ================== SOZLAMALAR ==================
+def obuna_klaviaturasi():
+    tugmalar = []
+    for kanal in majburiy_kanallar:
+        url = f"https://t.me/{kanal.replace('@', '')}"
+        tugmalar.append([InlineKeyboardButton(text=f"📢 {kanal} ga o'tish", url=url)])
+    tugmalar.append([InlineKeyboardButton(text="✅ Tasdiqlash", callback_data="tekshirish")])
+    return InlineKeyboardMarkup(inline_keyboard=tugmalar)
 
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
-DATABASE_URL = os.environ.get("DATABASE_URL")
+async def obunani_tekshirish(user_id):
+    if not majburiy_kanallar: return True 
+    for kanal in majburiy_kanallar:
+        if kanal.lower().endswith('bot'): continue
+        try:
+            azo = await bot.get_chat_member(chat_id=kanal, user_id=user_id)
+            if azo.status in ['left', 'kicked']: return False
+        except Exception: pass 
+    return True
 
-ADMIN_ID = 5660204735
-CHANNEL_ID = -1002392958296
-INVITE_LINK = "https://t.me/+M0Dauf0h0QoxMzgy"
+def check_vip(user_id):
+    if user_id == ADMIN_ID: return True
+    if user_id in vip_foydalanuvchilar:
+        if time.time() < vip_foydalanuvchilar[user_id]: return True
+        else: del vip_foydalanuvchilar[user_id]
+    return False
 
-bot = telebot.TeleBot(BOT_TOKEN)
+# ==========================================
+# 1. KANALDAN KINO SAQLASH
+# ==========================================
+@dp.channel_post(F.chat.id == BAZA_KANAL_ID)
+async def kanaldan_kino_saqlash(message: Message):
+    sarlavha = message.caption or message.text or ""
+    qidiruv = re.search(r'\((\d+)\)', sarlavha)
+    if qidiruv:
+        kino_kodi = qidiruv.group(1)
+        kinolar_xotirasi[kino_kodi] = message.message_id
+        if "vip" in sarlavha.lower():
+            vip_kinolar.add(kino_kodi)
+            print(f"💎 Yangi VIP kino saqlandi! Kodi: {kino_kodi}")
+        else:
+            print(f"✅ Yangi kino saqlandi! Kodi: {kino_kodi}")
 
-# ================== DATABASE ==================
+# ==========================================
+# 2. START TUGMASI 
+# ==========================================
+@dp.message(CommandStart())
+async def start_xabar(message: Message, command: CommandObject):
+    user_id = message.from_user.id
+    
+    if user_id not in foydalanuvchilar:
+        foydalanuvchilar.add(user_id)
+        referallar[user_id] = 0
+        
+        taklif_qilgan_id = command.args
+        if taklif_qilgan_id and taklif_qilgan_id.isdigit():
+            taklif_qilgan_id = int(taklif_qilgan_id)
+            if taklif_qilgan_id != user_id and taklif_qilgan_id in foydalanuvchilar:
+                referallar[taklif_qilgan_id] += 1
+                if referallar[taklif_qilgan_id] >= 10:
+                    referallar[taklif_qilgan_id] -= 10 
+                    vip_foydalanuvchilar[taklif_qilgan_id] = time.time() + VIP_MUDDATI
+                    try:
+                        await bot.send_message(taklif_qilgan_id, "🎉 Tabriklaymiz! Siz botga 10 ta do'stingizni taklif qildingiz va <b>1 OYLIK 💎 VIP Statusini</b> qo'lga kiritdingiz! Endi barcha yopiq kinolarni ko'ra olasiz.", parse_mode="HTML")
+                    except Exception: pass
 
-conn = psycopg2.connect(DATABASE_URL)
-cur = conn.cursor()
-
-cur.execute("""
-CREATE TABLE IF NOT EXISTS movies (
-    id INTEGER PRIMARY KEY,
-    file_id TEXT,
-    title TEXT
-)
-""")
-
-cur.execute("""
-CREATE TABLE IF NOT EXISTS users (
-    user_id BIGINT PRIMARY KEY,
-    last_active TIMESTAMP
-)
-""")
-
-cur.execute("""
-CREATE TABLE IF NOT EXISTS stats (
-    id INTEGER PRIMARY KEY,
-    requests INTEGER
-)
-""")
-
-cur.execute("""
-CREATE TABLE IF NOT EXISTS broadcasts (
-    id SERIAL PRIMARY KEY,
-    sent INTEGER,
-    failed INTEGER,
-    created_at TIMESTAMP DEFAULT NOW()
-)
-""")
-
-cur.execute(
-    "INSERT INTO stats (id, requests) VALUES (1,0) ON CONFLICT DO NOTHING"
-)
-
-conn.commit()
-
-# ================== MAJBURIY OBUNA ==================
-
-subscribed_users = set()
-
-def force_join_message(chat_id):
-    kb = InlineKeyboardMarkup()
-    kb.add(
-        InlineKeyboardButton("🔔 Kanalga obuna bo‘lish", url=INVITE_LINK),
-        InlineKeyboardButton("✅ Obuna bo‘ldim", callback_data="joined")
-    )
-    bot.send_message(
-        chat_id,
-        "❌ Kino olishdan oldin kanalga obuna bo‘ling 👇",
-        reply_markup=kb
-    )
-
-@bot.callback_query_handler(func=lambda c: c.data == "joined")
-def joined_callback(call):
-    subscribed_users.add(call.from_user.id)
-    bot.answer_callback_query(call.id, "✅ Obuna tasdiqlandi")
-    bot.send_message(call.message.chat.id, "🎬 Endi kino ID yozing")
-
-# ================== YORDAMCHI ==================
-
-def save_user(user_id):
-    cur.execute(
-        """
-        INSERT INTO users (user_id, last_active)
-        VALUES (%s, NOW())
-        ON CONFLICT (user_id)
-        DO UPDATE SET last_active = NOW()
-        """,
-        (user_id,)
-    )
-    conn.commit()
-
-def add_request():
-    cur.execute("UPDATE stats SET requests = requests + 1 WHERE id=1")
-    conn.commit()
-
-# ================== START ==================
-
-@bot.message_handler(commands=['start'])
-def start(message):
-    bot.send_message(
-        message.chat.id,
-        "🎬 *Oskar Kinolar* botiga xush kelibsiz!\n\n"
-        "Kino olish uchun *ID raqamini* yuboring.\n"
-        "Masalan: `125`",
-        parse_mode="Markdown"
-    )
-
-# ================== KANALDAN KINO SAQLASH ==================
-
-@bot.channel_post_handler(content_types=['video'])
-def save_movie(message):
-    if message.chat.id != CHANNEL_ID:
-        return
-
-    if not message.caption:
-        return
-
-    match = re.search(r'ID:\s*(\d+)', message.caption)
-    if not match:
-        return
-
-    movie_id = int(match.group(1))
-    file_id = message.video.file_id
-    title = message.caption.split('\n')[0]
-
-    cur.execute(
-        """
-        INSERT INTO movies (id, file_id, title)
-        VALUES (%s,%s,%s)
-        ON CONFLICT (id) DO NOTHING
-        """,
-        (movie_id, file_id, title)
-    )
-    conn.commit()
-
-# ================== KINO BERISH ==================
-
-@bot.message_handler(func=lambda m: m.text.isdigit())
-def send_movie(message):
-
-    if message.from_user.id != ADMIN_ID:
-        if message.from_user.id not in subscribed_users:
-            force_join_message(message.chat.id)
-            return
-
-    movie_id = int(message.text)
-
-    cur.execute(
-        "SELECT file_id, title FROM movies WHERE id=%s",
-        (movie_id,)
-    )
-    data = cur.fetchone()
-
-    if data:
-        save_user(message.from_user.id)
-        add_request()
-
-        bot.send_video(
-            message.chat.id,
-            data[0],
-            caption=f"🎬 {data[1]}"
+    if await obunani_tekshirish(user_id):
+        await message.answer(
+            "👋 Assalomu alaykum! OSKAR KINOLAR botiga xush kelibsiz.\n"
+            "🎬 Kino ko'rish uchun uning kodini yuboring.", reply_markup=asosiy_menyu
         )
     else:
-        bot.reply_to(message, "❌ Bunday ID dagi kino topilmadi")
+        await message.answer("Botdan to'liq foydalanish uchun kanallarga obuna bo'ling!✅", reply_markup=obuna_klaviaturasi())
 
-# ================== ADMIN PANEL ==================
+# ==========================================
+# 3. KABINET VA TASODIFIY KINO
+# ==========================================
+@dp.message(F.text == "👤 Shaxsiy kabinet")
+async def referal_menyu(message: Message):
+    bot_info = await bot.get_me()
+    user_id = message.from_user.id
+    takliflar = referallar.get(user_id, 0)
+    silka = f"https://t.me/{bot_info.username}?start={user_id}"
+    
+    if check_vip(user_id):
+        if user_id == ADMIN_ID:
+            status = "Admin"
+        else:
+            qolgan_sekundlar = vip_foydalanuvchilar[user_id] - time.time()
+            qolgan_kunlar = int(qolgan_sekundlar / (24 * 3600))
+            status = f"Faol (Yana {qolgan_kunlar} kun qoldi)"
+    else:
+        status = "Oddiy"
+    
+    matn = (
+        f"👤 <b>Sizning shaxsiy kabinetingiz</b>\n\n"
+        f"Holatingiz: {status}\n"
+        f"👥 Taklif qilgan do'stlaringiz: {takliflar} ta\n\n"
+        f"🔗 <b>Sizning tarqatish silkangiz:</b>\n{silka}\n\n"
+        f"<i>(Shu silkani do'stlaringizga yuboring, ular botga kirsa sizga ball yoziladi)</i>"
+    )
+    
+    await message.answer(matn, parse_mode="HTML")
 
-broadcast_mode = False
-
-@bot.message_handler(commands=['admin'])
-def admin_panel(message):
-    if message.from_user.id != ADMIN_ID:
+@dp.message(F.text == "🎲 Tasodifiy kino")
+async def tasodifiy_kino_berish(message: Message):
+    if not await obunani_tekshirish(message.from_user.id):
+        await message.answer("Botdan to'liq foydalanish uchun kanallarga obuna bo'ling!✅", reply_markup=obuna_klaviaturasi())
+        return
+        
+    if not kinolar_xotirasi:
+        await message.answer("❌ Hozircha bazada kinolar yo'q.")
         return
 
-    kb = ReplyKeyboardMarkup(resize_keyboard=True)
-    kb.add(
-        KeyboardButton("📊 Statistika"),
-        KeyboardButton("🗑 Kino o‘chirish"),
-        KeyboardButton("📢 Broadcast")
-    )
-
-    bot.send_message(message.chat.id, "👮 Admin panel", reply_markup=kb)
-
-# ================== STATISTIKA ==================
-
-@bot.message_handler(func=lambda m: m.text == "📊 Statistika")
-def show_stats(message):
-    if message.from_user.id != ADMIN_ID:
+    ruxsat_etilganlar = []
+    is_vip = check_vip(message.from_user.id)
+    
+    for kod in kinolar_xotirasi.keys():
+        if kod in vip_kinolar and not is_vip: continue
+        ruxsat_etilganlar.append(kod)
+        
+    if not ruxsat_etilganlar:
+        await message.answer("❌ Hozircha siz uchun ochiq kinolar topilmadi.")
         return
+        
+    tasodifiy_kod = random.choice(ruxsat_etilganlar)
+    xabar_id = kinolar_xotirasi[tasodifiy_kod]
+    
+    await message.answer("🎲 <b>Siz uchun tasodifiy kino tanlandi!</b>", parse_mode="HTML")
+    try:
+        await bot.copy_message(chat_id=message.from_user.id, from_chat_id=BAZA_KANAL_ID, message_id=xabar_id)
+    except Exception:
+        await message.answer("❌ Kinoni yuklashda xatolik yuz berdi.")
 
-    cur.execute("SELECT COUNT(*) FROM users")
-    total_users = cur.fetchone()[0]
+# ==========================================
+# 4. ADMIN FUNKSIYALARI (Qisqartirilgan)
+# ==========================================
+@dp.callback_query(F.data == "tekshirish")
+async def tasdiqlash_tugmasi(call: CallbackQuery):
+    if await obunani_tekshirish(call.from_user.id):
+        await call.message.delete()
+        await call.message.answer("✅ Obuna tasdiqlandi! Kino kodini yuborishingiz mumkin.", reply_markup=asosiy_menyu)
+    else:
+        await call.answer("❌ Hali hamma kanallarga obuna bo'lmadingiz!", show_alert=True)
 
-    cur.execute("""
-        SELECT COUNT(*) FROM users
-        WHERE last_active >= NOW() - INTERVAL '7 days'
-    """)
-    active_users = cur.fetchone()[0]
-
-    cur.execute("SELECT requests FROM stats WHERE id=1")
-    requests = cur.fetchone()[0]
-
-    bot.send_message(
-        message.chat.id,
-        f"📊 Statistika\n\n"
-        f"👥 Obuna bo‘lganlar: {total_users}\n"
-        f"🔥 Aktiv (7 kun): {active_users}\n"
-        f"🎬 Jami so‘rovlar: {requests}"
-    )
-
-# ================== BROADCAST ==================
-
-@bot.message_handler(func=lambda m: m.text == "📢 Broadcast")
-def start_broadcast(message):
-    global broadcast_mode
-    if message.from_user.id != ADMIN_ID:
-        return
-    broadcast_mode = True
-    bot.send_message(
-        message.chat.id,
-        "📢 Broadcast boshlandi.\n\n"
-        "Matn / rasm / video yuboring.\n"
-        "Bekor qilish: /cancel"
-    )
-
-@bot.message_handler(commands=['cancel'])
-def cancel_broadcast(message):
-    global broadcast_mode
+@dp.message(Command("addkanal"))
+async def kanal_qoshish(message: Message):
     if message.from_user.id == ADMIN_ID:
-        broadcast_mode = False
-        bot.send_message(message.chat.id, "❌ Broadcast bekor qilindi")
+        matn = message.text.split()
+        if len(matn) > 1:
+            kanal = matn[1]
+            if not kanal.startswith("@"): kanal = "@" + kanal
+            majburiy_kanallar.add(kanal)
+            await message.answer(f"✅ {kanal} ro'yxatga qo'shildi!")
 
-@bot.message_handler(
-    func=lambda m: broadcast_mode and m.from_user.id == ADMIN_ID,
-    content_types=['text', 'photo', 'video']
-)
-def send_broadcast(message):
-    global broadcast_mode
+@dp.message(Command("delkanal"))
+async def kanal_ochirish(message: Message):
+    if message.from_user.id == ADMIN_ID:
+        matn = message.text.split()
+        if len(matn) > 1:
+            kanal = matn[1]
+            if not kanal.startswith("@"): kanal = "@" + kanal
+            if kanal in majburiy_kanallar:
+                majburiy_kanallar.remove(kanal)
+                await message.answer(f"🗑 {kanal} o'chirildi!")
 
-    cur.execute("SELECT user_id FROM users")
-    users = cur.fetchall()
+@dp.message(Command("tarqat"))
+async def reklama_tarqatish(message: Message):
+    if message.from_user.id == ADMIN_ID and message.reply_to_message:
+        yuborildi = 0
+        kutish = await message.answer("⏳ Tarqatilmoqda...")
+        for user in foydalanuvchilar:
+            try:
+                await bot.copy_message(chat_id=user, from_chat_id=message.chat.id, message_id=message.reply_to_message.message_id)
+                yuborildi += 1
+                await asyncio.sleep(0.05) 
+            except Exception: pass
+        await kutish.delete()
+        await message.answer(f"✅ {yuborildi} ta foydalanuvchiga tarqatildi!")
 
-    sent = 0
-    failed = 0
+@dp.message(Command("stat"))
+async def statistika_korish(message: Message):
+    if message.from_user.id == ADMIN_ID:
+        await message.answer(
+            f"📊 <b>BOT STATISTIKASI</b>\n\n"
+            f"👥 Jami: {len(foydalanuvchilar)} ta\n"
+            f"🎬 Kinolar: {len(kinolar_xotirasi)} ta\n"
+            f"💎 VIP Kinolar: {len(vip_kinolar)} ta\n"
+            f"👑 VIP Odamlar: {len(vip_foydalanuvchilar)} ta\n"
+            f"📢 Majburiy obunalar: {len(majburiy_kanallar)} ta", 
+            parse_mode="HTML"
+        )
 
-    for (uid,) in users:
+# ==========================================
+# 5. KINONI YUBORISH (Shu joyda VIP xabar chiqadi)
+# ==========================================
+@dp.message(F.text)
+async def kino_yuborish(message: Message):
+    kod = message.text
+    
+    if not await obunani_tekshirish(message.from_user.id):
+        await message.answer("Botdan to'liq foydalanish uchun kanallarga obuna bo'ling!✅", reply_markup=obuna_klaviaturasi())
+        return
+
+    if kod in kinolar_xotirasi:
+        
+        # QACHONKI VIP KINONI SO'RASA SHU XABAR CHIQADI
+        if kod in vip_kinolar and not check_vip(message.from_user.id):
+            bot_info = await bot.get_me()
+            silka = f"https://t.me/{bot_info.username}?start={message.from_user.id}"
+            takliflar = referallar.get(message.from_user.id, 0)
+            qoldi = 10 - takliflar if takliflar < 10 else 0
+            
+            await message.answer(
+                f"🔒 <b>Bu yopiq (VIP) kino!</b>\n\n"
+                f"Siz tanlagan kinoni ko'rish uchun sizda <b>VIP status</b> bo'lishi kerak.\n"
+                f"Buning uchun pastdagi shaxsiy silkangizni do'stlaringizga yuboring va botga <b>10 ta do'stingizni</b> taklif qiling.\n\n"
+                f"📊 Hozirda sizning takliflaringiz: {takliflar} ta (Yana {qoldi} ta kerak)\n\n"
+                f"🔗 <b>Sizning tarqatish silkangiz:</b>\n{silka}", 
+                parse_mode="HTML"
+            )
+            return
+
+        xabar_id = kinolar_xotirasi[kod]
         try:
-            if message.content_type == 'text':
-                bot.send_message(uid, message.text)
-            elif message.content_type == 'photo':
-                bot.send_photo(uid, message.photo[-1].file_id, caption=message.caption)
-            elif message.content_type == 'video':
-                bot.send_video(uid, message.video.file_id, caption=message.caption)
-            sent += 1
-        except:
-            failed += 1
+             await bot.copy_message(chat_id=message.from_user.id, from_chat_id=BAZA_KANAL_ID, message_id=xabar_id)
+        except Exception:
+            await message.answer("❌ Kinoni yuklashda xatolik yuz berdi.")
+    else:
+        if kod.isdigit():
+            await message.answer("❌ Kechirasiz, bunday kodli kino topilmadi.")
 
-    cur.execute(
-        "INSERT INTO broadcasts (sent, failed) VALUES (%s,%s)",
-        (sent, failed)
-    )
-    conn.commit()
+async def main():
+    print("Bot muvaffaqiyatli ishga tushdi!")
+    await dp.start_polling(bot)
 
-    broadcast_mode = False
-
-    bot.send_message(
-        message.chat.id,
-        f"📢 Broadcast tugadi\n\n"
-        f"👀 Ko‘rildi: {sent}\n"
-        f"❌ Yetmadi: {failed}\n"
-        f"📊 Jami: {sent + failed}"
-    )
-
-# ================== START ==================
-
-bot.infinity_polling()
+if __name__ == "__main__":
+    asyncio.run(main())
