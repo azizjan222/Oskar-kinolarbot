@@ -24,7 +24,7 @@ vip_foydalanuvchilar = {}
 VIP_MUDDATI = 30 * 24 * 60 * 60 # 30 kun
 
 # ==========================================
-# ASOSIY MENYU TUGMALARI (Soddalashtirildi)
+# ASOSIY MENYU TUGMALARI
 # ==========================================
 asosiy_menyu = ReplyKeyboardMarkup(
     keyboard=[
@@ -59,15 +59,29 @@ def check_vip(user_id):
     return False
 
 # ==========================================
-# 1. KANALDAN KINO SAQLASH
+# 1. KANALDAN KINO SAQLASH (AQLLI TOZALASH)
 # ==========================================
 @dp.channel_post(F.chat.id == BAZA_KANAL_ID)
 async def kanaldan_kino_saqlash(message: Message):
     sarlavha = message.caption or message.text or ""
-    qidiruv = re.search(r'\((\d+)\)', sarlavha)
-    if qidiruv:
-        kino_kodi = qidiruv.group(1)
-        kinolar_xotirasi[kino_kodi] = message.message_id
+    
+    # Matndagi barcha qavs ichidagi raqamlarni topamiz
+    barcha_kodlar = re.findall(r'\((\d+)\)', sarlavha)
+    
+    if barcha_kodlar:
+        # Eng oxirgi qavs ichidagi raqamni kino kodi deb olamiz (yil bilan adashmasligi uchun)
+        kino_kodi = barcha_kodlar[-1]
+        
+        # FAqatgina aniqlangan kino kodini matndan olib tashlaymiz
+        toza_matn = sarlavha.replace(f"({kino_kodi})", "")
+        # VIP so'zini ham tozalaymiz
+        toza_matn = re.sub(r'(?i)vip', '', toza_matn).strip()
+        
+        kinolar_xotirasi[kino_kodi] = {
+            "id": message.message_id,
+            "caption": toza_matn
+        }
+        
         if "vip" in sarlavha.lower():
             vip_kinolar.add(kino_kodi)
             print(f"💎 Yangi VIP kino saqlandi! Kodi: {kino_kodi}")
@@ -157,16 +171,20 @@ async def tasodifiy_kino_berish(message: Message):
         return
         
     tasodifiy_kod = random.choice(ruxsat_etilganlar)
-    xabar_id = kinolar_xotirasi[tasodifiy_kod]
+    xabar_id = kinolar_xotirasi[tasodifiy_kod]["id"]
+    toza_matn = kinolar_xotirasi[tasodifiy_kod]["caption"]
+    
+    bot_info = await bot.get_me()
+    yakuniy_matn = f"{toza_matn}\n\n🤖 Bizning bot: @{bot_info.username}" if toza_matn else f"🤖 Bizning bot: @{bot_info.username}"
     
     await message.answer("🎲 <b>Siz uchun tasodifiy kino tanlandi!</b>", parse_mode="HTML")
     try:
-        await bot.copy_message(chat_id=message.from_user.id, from_chat_id=BAZA_KANAL_ID, message_id=xabar_id)
+        await bot.copy_message(chat_id=message.from_user.id, from_chat_id=BAZA_KANAL_ID, message_id=xabar_id, caption=yakuniy_matn)
     except Exception:
         await message.answer("❌ Kinoni yuklashda xatolik yuz berdi.")
 
 # ==========================================
-# 4. ADMIN FUNKSIYALARI (Qisqartirilgan)
+# 4. ADMIN FUNKSIYALARI
 # ==========================================
 @dp.callback_query(F.data == "tekshirish")
 async def tasdiqlash_tugmasi(call: CallbackQuery):
@@ -225,7 +243,7 @@ async def statistika_korish(message: Message):
         )
 
 # ==========================================
-# 5. KINONI YUBORISH (Shu joyda VIP xabar chiqadi)
+# 5. KINONI YUBORISH (Chiroyli matn bilan)
 # ==========================================
 @dp.message(F.text)
 async def kino_yuborish(message: Message):
@@ -236,8 +254,6 @@ async def kino_yuborish(message: Message):
         return
 
     if kod in kinolar_xotirasi:
-        
-        # QACHONKI VIP KINONI SO'RASA SHU XABAR CHIQADI
         if kod in vip_kinolar and not check_vip(message.from_user.id):
             bot_info = await bot.get_me()
             silka = f"https://t.me/{bot_info.username}?start={message.from_user.id}"
@@ -254,9 +270,14 @@ async def kino_yuborish(message: Message):
             )
             return
 
-        xabar_id = kinolar_xotirasi[kod]
+        xabar_id = kinolar_xotirasi[kod]["id"]
+        toza_matn = kinolar_xotirasi[kod]["caption"]
+        
+        bot_info = await bot.get_me()
+        yakuniy_matn = f"{toza_matn}\n\n🤖 Bizning bot: @{bot_info.username}" if toza_matn else f"🤖 Bizning bot: @{bot_info.username}"
+        
         try:
-             await bot.copy_message(chat_id=message.from_user.id, from_chat_id=BAZA_KANAL_ID, message_id=xabar_id)
+             await bot.copy_message(chat_id=message.from_user.id, from_chat_id=BAZA_KANAL_ID, message_id=xabar_id, caption=yakuniy_matn)
         except Exception:
             await message.answer("❌ Kinoni yuklashda xatolik yuz berdi.")
     else:
